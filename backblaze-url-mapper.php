@@ -2,12 +2,38 @@
 /**
  * Plugin Name: Backblaze Folder URL Mapper
  * Description: Map specific local upload folders to Backblaze B2 URLs without changing the database.
- * Version:     1.0.0
+ * Version:     1.0.1
  * Author:      Strong Anchor Tech
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
+}
+
+/**
+ * Normalize a local prefix so it starts and ends with a slash.
+ *
+ * @param string $local
+ * @return string
+ */
+function bb_url_mapper_normalize_local_prefix( $local ) {
+    $local = trim( $local );
+
+    if ( $local === '' ) {
+        return $local;
+    }
+
+    // Ensure it starts with a slash.
+    if ( $local[0] !== '/' ) {
+        $local = '/' . ltrim( $local, '/' );
+    }
+
+    // Ensure it ends with a slash.
+    if ( substr( $local, -1 ) !== '/' ) {
+        $local .= '/';
+    }
+
+    return $local;
 }
 
 /**
@@ -18,9 +44,6 @@ if ( ! defined( 'ABSPATH' ) ) {
  *   'local_prefix' => '/wp-content/uploads/2023/',
  *   'remote_base'  => 'https://f002.backblazeb2.com/file/funwithaview-wp-content/wp-content/uploads/2023/'
  * ]
- *
- * Local prefix is relative to the site root (starts with /).
- * Remote base is a full URL, typically ending with /.
  */
 function bb_url_mapper_get_mappings() {
     $mappings = get_option( 'bb_url_mapper_mappings', array() );
@@ -28,12 +51,12 @@ function bb_url_mapper_get_mappings() {
         $mappings = array();
     }
 
-    // Normalize structure.
     foreach ( $mappings as $index => $mapping ) {
         if ( ! is_array( $mapping ) ) {
             unset( $mappings[ $index ] );
             continue;
         }
+
         $local  = isset( $mapping['local_prefix'] ) ? trim( $mapping['local_prefix'] ) : '';
         $remote = isset( $mapping['remote_base'] ) ? trim( $mapping['remote_base'] ) : '';
 
@@ -42,12 +65,15 @@ function bb_url_mapper_get_mappings() {
             continue;
         }
 
-        // Ensure local prefix starts with a slash.
-        if ( $local[0] !== '/' ) {
-            $local = '/' . ltrim( $local, '/' );
+        $local  = bb_url_mapper_normalize_local_prefix( $local );
+        $remote = esc_url_raw( $remote );
+
+        if ( $remote === '' ) {
+            unset( $mappings[ $index ] );
+            continue;
         }
 
-        // Ensure remote base has a trailing slash.
+        // Ensure remote base has trailing slash.
         if ( substr( $remote, -1 ) !== '/' ) {
             $remote .= '/';
         }
@@ -73,6 +99,7 @@ function bb_url_mapper_save_mappings_from_post() {
     }
 
     if ( ! isset( $_POST['bb_mappings'] ) || ! is_array( $_POST['bb_mappings'] ) ) {
+        update_option( 'bb_url_mapper_mappings', array() );
         return;
     }
 
@@ -91,12 +118,16 @@ function bb_url_mapper_save_mappings_from_post() {
             continue;
         }
 
-        // Basic sanitization.
-        $local  = sanitize_text_field( $local );
+        $local  = bb_url_mapper_normalize_local_prefix( sanitize_text_field( $local ) );
         $remote = esc_url_raw( $remote );
 
         if ( $remote === '' ) {
             continue;
+        }
+
+        // Ensure remote base has trailing slash.
+        if ( substr( $remote, -1 ) !== '/' ) {
+            $remote .= '/';
         }
 
         $new_mappings[] = array(
@@ -122,23 +153,16 @@ function bb_url_mapper_replace_in_string( $string ) {
     }
 
     $home = home_url();
-    $home_no_scheme_http  = set_url_scheme( $home, 'http' );
-    $home_no_scheme_https = set_url_scheme( $home, 'https' );
+    $home_http  = set_url_scheme( $home, 'http' );
+    $home_https = set_url_scheme( $home, 'https' );
 
     foreach ( $mappings as $mapping ) {
         $local_prefix = $mapping['local_prefix'];
         $remote_base  = $mapping['remote_base'];
 
-        // Build full local URL prefixes (http and https).
-        $local_http  = rtrim( $home_no_scheme_http, '/' ) . $local_prefix;
-        $local_https = rtrim( $home_no_scheme_https, '/' ) . $local_prefix;
+        $local_http  = rtrim( $home_http, '/' ) . $local_prefix;
+        $local_https = rtrim( $home_https, '/' ) . $local_prefix;
 
-        // Ensure remote base ends with a slash (already done in getter but be safe).
-        if ( substr( $remote_base, -1 ) !== '/' ) {
-            $remote_base .= '/';
-        }
-
-        // Replace both http and https variants.
         $string = str_replace( $local_http, $remote_base, $string );
         $string = str_replace( $local_https, $remote_base, $string );
     }
@@ -161,7 +185,7 @@ function bb_url_mapper_filter_url( $url ) {
 }
 
 /**
- * Filter for image src arrays.
+ * Filter for image src arrays (wp_get_attachment_image_src).
  *
  * $image is array( url, width, height, is_intermediate ).
  */
@@ -173,6 +197,25 @@ function bb_url_mapper_filter_image_src( $image, $attachment_id = 0, $size = '',
 }
 
 /**
+ * Filter for srcset arrays (wp_calculate_image_srcset).
+ *
+ * $sources is an array of arrays with 'url' keys.
+ */
+function bb_url_mapper_filter_srcset( $sources ) {
+    if ( ! is_array( $sources ) ) {
+        return $sources;
+    }
+
+    foreach ( $sources as $width => $source ) {
+        if ( isset( $source['url'] ) && is_string( $source['url'] ) ) {
+            $sources[ $width ]['url'] = bb_url_mapper_replace_in_string( $source['url'] );
+        }
+    }
+
+    return $sources;
+}
+
+/**
  * Register filters.
  */
 function bb_url_mapper_register_filters() {
@@ -181,13 +224,11 @@ function bb_url_mapper_register_filters() {
     add_filter( 'widget_text', 'bb_url_mapper_filter_content', 20 );
     add_filter( 'widget_block_content', 'bb_url_mapper_filter_content', 20 );
 
-    // Attachment URLs.
+    // Attachment URLs and HTML.
     add_filter( 'wp_get_attachment_url', 'bb_url_mapper_filter_url', 20, 1 );
     add_filter( 'post_thumbnail_html', 'bb_url_mapper_filter_content', 20, 1 );
-
-    // Image src/srcset.
     add_filter( 'wp_get_attachment_image_src', 'bb_url_mapper_filter_image_src', 20, 4 );
-    add_filter( 'wp_calculate_image_srcset', 'bb_url_mapper_filter_url', 20, 1 );
+    add_filter( 'wp_calculate_image_srcset', 'bb_url_mapper_filter_srcset', 20, 5 );
 }
 add_action( 'init', 'bb_url_mapper_register_filters' );
 
@@ -226,7 +267,7 @@ function bb_url_mapper_render_settings_page() {
         'remote_base'  => '',
     );
 
-    $upload_dir = wp_get_upload_dir();
+    $upload_dir           = wp_get_upload_dir();
     $suggested_local_2023 = '/wp-content/uploads/2023/';
     ?>
     <div class="wrap">
@@ -294,8 +335,8 @@ function bb_url_mapper_render_settings_page() {
 
         <h2>How it works</h2>
         <ol>
-            <li>For each mapping, the plugin builds the full local URL using your <code>home_url()</code> and the local prefix.</li>
-            <li>On output, it replaces occurrences of that local URL with the remote base URL.</li>
+            <li>For each mapping, the plugin builds the full local URL using your <code>home_url()</code> and the local prefix (forced to <code>/.../</code>).</li>
+            <li>On output, it replaces occurrences of that local URL (http and https) with the remote base URL.</li>
             <li>Only matching folders are rewritten (e.g. <code>/wp-content/uploads/2023/</code>), so newer folders remain local.</li>
         </ol>
 
