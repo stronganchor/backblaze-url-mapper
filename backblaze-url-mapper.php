@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Backblaze Folder URL Mapper
  * Description: Map specific local upload folders to Backblaze B2 URLs at runtime (safe version: no automatic DB migration).
- * Version:     1.1.2
+ * Version:     1.1.3
  * Author:      Strong Anchor Tech
  */
 
