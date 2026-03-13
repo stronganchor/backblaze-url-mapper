@@ -3,12 +3,64 @@
  * Plugin Name: Backblaze Folder URL Mapper
  * Description: Map specific local upload folders to Backblaze B2 URLs at runtime (safe version: no automatic DB migration).
  * Version:     1.1.4
+ * Update URI: https://github.com/stronganchor/backblaze-url-mapper
  * Author:      Strong Anchor Tech
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
+
+function bb_url_mapper_get_update_branch() {
+    $branch = 'main';
+
+    if ( defined( 'BB_URL_MAPPER_UPDATE_BRANCH' ) && is_string( BB_URL_MAPPER_UPDATE_BRANCH ) ) {
+        $override = trim( BB_URL_MAPPER_UPDATE_BRANCH );
+        if ( '' !== $override ) {
+            $branch = $override;
+        }
+    }
+
+    return (string) apply_filters( 'bb_url_mapper_update_branch', $branch );
+}
+
+function bb_url_mapper_bootstrap_update_checker() {
+    $checker_file = plugin_dir_path( __FILE__ ) . 'plugin-update-checker/plugin-update-checker.php';
+    if ( ! file_exists( $checker_file ) ) {
+        return;
+    }
+
+    require_once $checker_file;
+
+    if ( ! class_exists( '\YahnisElsts\PluginUpdateChecker\v5\PucFactory' ) ) {
+        return;
+    }
+
+    $repo_url = (string) apply_filters( 'bb_url_mapper_update_repository', 'https://github.com/stronganchor/backblaze-url-mapper' );
+    $slug     = dirname( plugin_basename( __FILE__ ) );
+
+    $update_checker = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+        $repo_url,
+        __FILE__,
+        $slug
+    );
+
+    $update_checker->setBranch( bb_url_mapper_get_update_branch() );
+
+    foreach ( array( 'BB_URL_MAPPER_GITHUB_TOKEN', 'STRONGANCHOR_GITHUB_TOKEN', 'ANCHOR_GITHUB_TOKEN' ) as $constant_name ) {
+        if ( ! defined( $constant_name ) || ! is_string( constant( $constant_name ) ) ) {
+            continue;
+        }
+
+        $token = trim( (string) constant( $constant_name ) );
+        if ( '' !== $token ) {
+            $update_checker->setAuthentication( $token );
+            break;
+        }
+    }
+}
+
+bb_url_mapper_bootstrap_update_checker();
 
 function bb_url_mapper_normalize_local_prefix( $local ) {
     $local = trim( (string) $local );
